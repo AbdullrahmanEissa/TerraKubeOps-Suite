@@ -1,0 +1,74 @@
+---
+- hosts: all
+  become: true
+  vars:
+    nginx_image: "nginx:latest"
+    service_port: 80
+
+  tasks:
+
+    - name: Update APT cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install prerequisites
+      apt:
+        name:
+          - curl
+          - apt-transport-https
+          - ca-certificates
+          - software-properties-common
+        state: present
+
+    - name: Install Docker (required by k3s)
+      apt:
+        name: docker.io
+        state: present
+
+    - name: Enable & start Docker
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add ubuntu user to docker group
+      user:
+        name: ubuntu
+        append: yes
+        groups: docker
+
+    - name: Disable swap (required by k3s)
+      shell: |
+        swapoff -a
+        sed -i '/ swap / s/^/#/' /etc/fstab
+
+    - name: Install k3s
+      shell: curl -sfL https://get.k3s.io | sh -
+      args:
+        creates: /usr/local/bin/k3s
+
+    - name: Wait for k3s to be ready
+      shell: kubectl get nodes --no-headers
+      register: k3s_status
+      retries: 10
+      delay: 10
+      until: k3s_status.rc == 0
+
+    - name: Deploy Nginx Deployment
+      shell: kubectl create deployment nginx --image={{ nginx_image }}
+      register: deploy_result
+      failed_when: deploy_result is failed or (deploy_result.rc is defined and deploy_result.rc != 0 and "AlreadyExists" not in deploy_result.stderr)
+
+    - name: Expose Nginx Deployment as NodePort
+      shell: kubectl expose deployment nginx --type=NodePort --port={{ service_port }}
+      register: expose_result
+      failed_when: expose_result is failed or (expose_result.rc is defined and expose_result.rc != 0 and "AlreadyExists" not in expose_result.stderr)
+
+    - name: Get NodePort for Nginx
+      shell: kubectl get svc nginx -o jsonpath='{.spec.ports[0].nodePort}'
+      register: node_port
+
+    - name: Display External Access URL
+      debug:
+        msg: "Access Nginx at: http://{{ inventory_hostname }}:{{ node_port.stdout }}"
